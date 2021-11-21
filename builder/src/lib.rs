@@ -39,6 +39,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     });
 
+    let clone_build_fields = fields.iter().cloned().map(|field| {
+        let var = field.ident.clone().expect("Except named struct");
+        quote! {
+            #var: self.#var.clone().ok_or(concat!(stringify!(#var), " has not been set."))?,
+        }
+    });
+
     let build_struct = quote! {
         #vis struct #bident {
             #(#optionized_fields)*
@@ -53,6 +60,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         impl #bident {
+            pub fn build(&mut self) -> ::std::result::Result<#ident, Box<dyn ::std::error::Error>> {
+                Ok(#ident {
+                    #(#clone_build_fields)*
+                })
+            }
             #(#setter)*
         }
     };
