@@ -1,69 +1,61 @@
-use proc_macro::TokenStream;
-use quote::quote;
-use syn::{
-    parse_macro_input, Data, DeriveInput, Field, GenericArgument, Ident, PathArguments,
-    PathSegment, Type,
-};
+mod parse_type;
 
-enum InputType {
-    Normal(Type),
-    Optional(Type),
+use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
+use quote::quote;
+use syn::{parse_macro_input, Data, DeriveInput, Field, Ident, Type};
+
+use crate::parse_type::detect_option;
+
+struct InputField {
+    var: Ident,
+    ty: Type,
+    is_option: bool,
 }
 
-impl InputType {
-    fn from_input(ty: &Type) -> InputType {
-        match Self::detect_option(ty) {
-            Some(ty) => Self::Optional(ty),
-            None => Self::Normal(ty.clone()),
+impl From<&Field> for InputField {
+    fn from(field: &Field) -> Self {
+        let var = field.ident.clone().expect("Except named struct");
+        let mut is_option = false;
+        let mut ty = field.ty.clone();
+        if let Some(option_ty) = detect_option(&ty) {
+            is_option = true;
+            ty = option_ty;
+        }
+
+        Self { var, ty, is_option }
+    }
+}
+
+impl InputField {
+    fn builder_fields(&self) -> TokenStream2 {
+        let var = &self.var;
+        let ty = &self.ty;
+        quote! { #var: ::std::option::Option<#ty>, }
+    }
+
+    fn builder_init(&self) -> TokenStream2 {
+        let var = &self.var;
+        quote! { #var: None, }
+    }
+
+    fn setter_fns(&self) -> TokenStream2 {
+        let var = &self.var;
+        let ty = &self.ty;
+        quote! {
+            fn #var(&mut self, #var: #ty) -> &mut Self {
+                self.#var = Some(#var);
+                self
+            }
         }
     }
 
-    fn detect_option(ty: &Type) -> Option<Type> {
-        if let Type::Path(path) = ty {
-            if path.qself.is_some() {
-                return None;
-            }
-
-            let path_segs: Vec<&PathSegment> = path.path.segments.iter().collect();
-            let idents: Vec<String> = path_segs
-                .iter()
-                .map(|seg| format!("{}", seg.ident))
-                .collect();
-
-            let option_seg = if idents.len() == 1 && idents[0] == "Option" {
-                &path_segs[0].arguments
-            } else if idents.len() == 3
-                && idents[0] == "std"
-                && idents[1] == "option"
-                && idents[2] == "Option"
-            {
-                &path_segs[2].arguments
-            } else {
-                return None;
-            };
-
-            if let PathArguments::AngleBracketed(generic_args) = option_seg {
-                assert_eq!(
-                    generic_args.args.len(),
-                    1,
-                    "std::option::Option<T> has one generic param"
-                );
-                if let GenericArgument::Type(ty) = generic_args.args.first().unwrap() {
-                    return Some(ty.clone());
-                } else {
-                    unreachable!("In std::option::Option<T>, T should be a type.");
-                }
-            } else {
-                unreachable!("std::option::Option<T> should be AngleBracketed");
-            }
-        }
-        None
-    }
-
-    fn into_type(self) -> Type {
-        match self {
-            InputType::Normal(ty) => ty,
-            InputType::Optional(ty) => ty,
+    fn clone_to_struct(&self) -> TokenStream2 {
+        let var = &self.var;
+        if self.is_option {
+            quote! { #var: self.#var.clone(), }
+        } else {
+            quote! { #var: self.#var.clone().ok_or(concat!(stringify!(#var), " has not been set."))?, }
         }
     }
 }
@@ -77,49 +69,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let ident = &ast.ident;
     let bident = Ident::new(&format!("{}Builder", ident), ident.span());
 
-    let fields: Vec<&Field> = if let Data::Struct(ref data_struct) = ast.data {
-        data_struct.fields.iter().collect()
+    let fields: Vec<InputField> = if let Data::Struct(ref data_struct) = ast.data {
+        data_struct.fields.iter().map(|x| x.into()).collect()
     } else {
         unimplemented!("Only support struct");
     };
 
-    let optionized_fields = fields.iter().cloned().map(|field| {
-        let var = field.ident.clone().expect("Except named struct");
-        let ty = InputType::from_input(&field.ty).into_type();
-        quote! { #var: ::std::option::Option<#ty>, }
-    });
-
-    let init_fields = fields.iter().cloned().map(|field| {
-        let var = field.ident.clone().expect("Except named struct");
-        quote! { #var: None, }
-    });
-
-    let setter = fields.iter().cloned().map(|field| {
-        let var = field.ident.clone().expect("Except named struct");
-        let ty = InputType::from_input(&field.ty).into_type();
-        quote! {
-            fn #var(&mut self, #var: #ty) -> &mut Self {
-                self.#var = Some(#var);
-                self
-            }
-        }
-    });
-
-    let clone_build_fields = fields.iter().cloned().map(|field| {
-        let var = field.ident.clone().expect("Except named struct");
-        match InputType::from_input(&field.ty) {
-            InputType::Normal(_) => quote! {
-                #var: self.#var.clone().ok_or(concat!(stringify!(#var), " has not been set."))?,
-            },
-            InputType::Optional(_) => quote! {
-                #var: self.#var.clone(),
-            },
-        }
-    });
+    let builder_fields = fields.iter().map(InputField::builder_fields);
+    let init_fields = fields.iter().map(InputField::builder_init);
+    let setter_fns = fields.iter().map(InputField::setter_fns);
+    let clone_to_struct = fields.iter().map(InputField::clone_to_struct);
 
     let build_struct = quote! {
         #vis struct #bident {
-            #(#optionized_fields)*
+            #(#builder_fields)*
         }
 
         impl #ident {
@@ -133,10 +96,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
         impl #bident {
             pub fn build(&mut self) -> ::std::result::Result<#ident, Box<dyn ::std::error::Error>> {
                 Ok(#ident {
-                    #(#clone_build_fields)*
+                    #(#clone_to_struct)*
                 })
             }
-            #(#setter)*
+            #(#setter_fns)*
         }
     };
     build_struct.into()
