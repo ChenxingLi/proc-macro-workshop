@@ -28,6 +28,17 @@ pub fn derive(input: TokenStream) -> TokenStream {
         quote! { #var: None, }
     });
 
+    let setter = fields.iter().cloned().map(|field| {
+        let var = field.ident.clone().expect("Except named struct");
+        let ty = field.ty.clone();
+        quote! {
+            fn #var(&mut self, #var: #ty) -> &mut Self {
+                self.#var = Some(#var);
+                self
+            }
+        }
+    });
+
     let build_struct = quote! {
         #vis struct #bident {
             #(#optionized_fields)*
@@ -39,6 +50,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     #(#init_fields)*
                 }
             }
+        }
+
+        impl #bident {
+            #(#setter)*
         }
     };
     build_struct.into()
