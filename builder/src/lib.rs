@@ -150,7 +150,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         impl #bident {
-            pub fn build(&mut self) -> ::std::result::Result<#ident, Box<dyn ::std::error::Error>> {
+            pub fn build(&mut self) -> ::std::result::Result<#ident, ::std::boxed::Box<dyn ::std::error::Error>> {
                 Ok(#ident {
                     #(#clone_to_struct)*
                 })
