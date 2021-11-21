@@ -1,6 +1,7 @@
+use syn::spanned::Spanned;
 use syn::{
-    AttrStyle, Attribute, GenericArgument, Ident, Lit, Meta, MetaList, MetaNameValue, NestedMeta,
-    PathArguments, PathSegment, Type,
+    AttrStyle, Attribute, Error, GenericArgument, Ident, Lit, Meta, MetaList, MetaNameValue,
+    NestedMeta, PathArguments, PathSegment, Type,
 };
 
 pub fn detect_vec(ty: &Type) -> Option<Type> {
@@ -81,9 +82,9 @@ pub fn detect_option(ty: &Type) -> Option<Type> {
     None
 }
 
-pub fn parse_builder_attribute(attr: &Attribute) -> Option<Ident> {
+pub fn parse_builder_attribute(attr: &Attribute) -> Result<Option<Ident>, Error> {
     if matches!(attr.style, AttrStyle::Inner(_)) {
-        return None;
+        return Ok(None);
     }
 
     let meta = attr.parse_meta().unwrap();
@@ -91,15 +92,15 @@ pub fn parse_builder_attribute(attr: &Attribute) -> Option<Ident> {
     if let Meta::List(MetaList { path, nested, .. }) = meta {
         // Check path
         if path.segments.len() != 1 {
-            return None;
+            return Ok(None);
         }
         let attr_name = path.segments.first().unwrap();
         if !attr_name.arguments.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         if attr_name.ident.to_string() != "builder" {
-            return None;
+            return Ok(None);
         }
 
         // Check nested
@@ -116,9 +117,15 @@ pub fn parse_builder_attribute(attr: &Attribute) -> Option<Ident> {
                 path.segments.first().unwrap().arguments,
                 PathArguments::None
             );
-            assert_eq!(path.segments.first().unwrap().ident.to_string(), "each");
+            let attr_key = &path.segments.first().unwrap().ident;
+            if attr_key.to_string() != "each" {
+                return Err(Error::new(
+                    attr.tokens.span().join(attr.path.span()).unwrap(),
+                    "expected `builder(each = \"...\")`",
+                ));
+            }
 
-            return Some(Ident::new(&lit_str.value(), lit_str.span()));
+            return Ok(Some(Ident::new(&lit_str.value(), lit_str.span())));
         } else {
             unreachable!()
         }

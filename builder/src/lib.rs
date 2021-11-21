@@ -3,7 +3,8 @@ mod parse_type;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Field, Ident, Type};
+use std::convert::{TryFrom, TryInto};
+use syn::{parse_macro_input, Data, DeriveInput, Error, Field, Ident, Type};
 
 use crate::parse_type::{detect_option, detect_vec, parse_builder_attribute};
 
@@ -14,8 +15,9 @@ struct InputField {
     vec_setter: Option<Ident>,
 }
 
-impl From<&Field> for InputField {
-    fn from(field: &Field) -> Self {
+impl TryFrom<&Field> for InputField {
+    type Error = Error;
+    fn try_from(field: &Field) -> Result<Self, Error> {
         let var = field.ident.clone().expect("Except named struct");
 
         let mut is_option = false;
@@ -26,23 +28,27 @@ impl From<&Field> for InputField {
             ty = option_ty;
         }
 
-        let vec_setter = field
-            .attrs
-            .iter()
-            .map(parse_builder_attribute)
-            .find(|maybe_ident| maybe_ident.is_some())
-            .map(|maybe_ident| maybe_ident.unwrap());
+        let mut iter = field.attrs.iter();
+        let vec_setter = loop {
+            if let Some(attr) = iter.next() {
+                if let Some(ident) = parse_builder_attribute(attr)? {
+                    break Some(ident);
+                }
+            } else {
+                break None;
+            }
+        };
 
         if vec_setter.is_some() {
             ty = detect_vec(&ty).expect("Type should be Vec if 'each' is set");
         }
 
-        Self {
+        Ok(Self {
             var,
             ty,
             is_option,
             vec_setter,
-        }
+        })
     }
 }
 
@@ -106,10 +112,23 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let ident = &ast.ident;
     let bident = Ident::new(&format!("{}Builder", ident), ident.span());
 
-    let fields: Vec<InputField> = if let Data::Struct(ref data_struct) = ast.data {
-        data_struct.fields.iter().map(|x| x.into()).collect()
-    } else {
-        unimplemented!("Only support struct");
+    let parse_fields = || -> Result<Vec<InputField>, Error> {
+        if let Data::Struct(ref data_struct) = ast.data {
+            let mut parse_fields = Vec::with_capacity(data_struct.fields.len());
+            for x in data_struct.fields.iter() {
+                parse_fields.push(x.try_into()?);
+            }
+            Ok(parse_fields)
+        } else {
+            unimplemented!("Only support struct");
+        }
+    };
+
+    let fields = match parse_fields() {
+        Ok(fields) => fields,
+        Err(err) => {
+            return err.into_compile_error().into();
+        }
     };
 
     let builder_fields = fields.iter().map(InputField::builder_fields);
