@@ -5,25 +5,44 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Field, Ident, Type};
 
-use crate::parse_type::detect_option;
+use crate::parse_type::{detect_option, detect_vec, parse_builder_attribute};
 
 struct InputField {
     var: Ident,
     ty: Type,
     is_option: bool,
+    vec_setter: Option<Ident>,
 }
 
 impl From<&Field> for InputField {
     fn from(field: &Field) -> Self {
         let var = field.ident.clone().expect("Except named struct");
+
         let mut is_option = false;
         let mut ty = field.ty.clone();
+
         if let Some(option_ty) = detect_option(&ty) {
             is_option = true;
             ty = option_ty;
         }
 
-        Self { var, ty, is_option }
+        let vec_setter = field
+            .attrs
+            .iter()
+            .map(parse_builder_attribute)
+            .find(|maybe_ident| maybe_ident.is_some())
+            .map(|maybe_ident| maybe_ident.unwrap());
+
+        if vec_setter.is_some() {
+            ty = detect_vec(&ty).expect("Type should be Vec if 'each' is set");
+        }
+
+        Self {
+            var,
+            ty,
+            is_option,
+            vec_setter,
+        }
     }
 }
 
@@ -31,28 +50,46 @@ impl InputField {
     fn builder_fields(&self) -> TokenStream2 {
         let var = &self.var;
         let ty = &self.ty;
-        quote! { #var: ::std::option::Option<#ty>, }
+        if self.vec_setter.is_some() {
+            quote! { #var: ::std::vec::Vec<#ty>, }
+        } else {
+            quote! { #var: ::std::option::Option<#ty>, }
+        }
     }
 
     fn builder_init(&self) -> TokenStream2 {
         let var = &self.var;
-        quote! { #var: None, }
+        if self.vec_setter.is_some() {
+            quote! { #var: ::std::vec::Vec::new(), }
+        } else {
+            quote! { #var: None, }
+        }
     }
 
     fn setter_fns(&self) -> TokenStream2 {
         let var = &self.var;
         let ty = &self.ty;
-        quote! {
-            fn #var(&mut self, #var: #ty) -> &mut Self {
-                self.#var = Some(#var);
-                self
+        if let Some(setter) = &self.vec_setter {
+            let input = Ident::new(&format!("{}_item", var), var.span());
+            quote! {
+                fn #setter(&mut self, #input: #ty) -> &mut Self {
+                    self.#var.push(#input);
+                    self
+                }
+            }
+        } else {
+            quote! {
+                fn #var(&mut self, #var: #ty) -> &mut Self {
+                    self.#var = Some(#var);
+                    self
+                }
             }
         }
     }
 
     fn clone_to_struct(&self) -> TokenStream2 {
         let var = &self.var;
-        if self.is_option {
+        if self.is_option || self.vec_setter.is_some() {
             quote! { #var: self.#var.clone(), }
         } else {
             quote! { #var: self.#var.clone().ok_or(concat!(stringify!(#var), " has not been set."))?, }
@@ -60,7 +97,7 @@ impl InputField {
     }
 }
 
-#[proc_macro_derive(Builder)]
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     // eprint!("{:#?}", ast);
